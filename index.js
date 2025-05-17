@@ -1,166 +1,179 @@
-import express from 'express'; //server
-import bodyParser from 'body-parser'; //Middleware
+import express from 'express';
+import mysql from 'mysql2';
+import bodyParser from 'body-parser';
 import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
-import mysql from 'mysql2';
 import dotenv from 'dotenv';
 
-dotenv.config(); // Load environment variables
-const JWT_SECRET = process.env.JWT_SECRET || 'fallback_secret_key';
-
+dotenv.config(); // Load .env file
 
 const app = express();
-const port = 3000;
+const port = process.env.PORT || 5000;
+const saltRounds = 10;
+
+// Middleware
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+app.use(bodyParser.json());
+
+// MySQL connection
+const connection = mysql.createConnection({
+  host: 'localhost',
+  user: 'root',
+  password: '', // Update with your MySQL password
+  database: 'blog_db', // Ensure this database exists
+});
+
+connection.connect((err) => {
+  if (err) {
+    console.error('❌ MySQL connection error:', err.message);
+    process.exit(1); // Exit if connection fails
+  }
+  console.log('✅ Connected to MySQL database');
+});
+
 
 // Start server
 app.listen(port, () => {
-  console.log('Running on port ' + port);
-  console.log('Server is running on http://localhost:' + port);
+  console.log(`server running at http://localhost:${port}`);
 });
 
-app.get('/api', (req, res) => {
-  res.send('REST API is working');
+// Add test route to verify server is running
+app.get('/ping', (req, res) => {
+  res.send('pong');
 });
 
-// Database connection
-const db = mysql.createConnection({
-  host: 'localhost',
-  user: 'root',
-  password: '',
-  database: 'blog_db'
-});
-
-db.connect(err => {
-  if (err) throw err;
-  console.log('Connected to MySQL!');
-});
-
-// Register a user
+// Register
 app.post('/register', async (req, res) => {
   const { username, password } = req.body;
 
-  if (!username || !password) {
-    return res.status(400).json({ error: 'Username and password are required' });
-  }
-
   try {
-    const hashedPassword = await bcrypt.hash(password, 10);
-    const sql = 'INSERT INTO login_tbl (username, password) VALUES (?, ?)';
+    const hashedPassword = await bcrypt.hash(password, saltRounds);
 
-    db.query(sql, [username, hashedPassword], (err, result) => {
-      if (err) {
-        console.error('Database error:', err.message);
-        return res.status(500).json({ error: 'Database error', details: err.message });
+    connection.query(
+      'INSERT INTO login_tbl (username, password) VALUES (?, ?)',
+      [username, hashedPassword],
+      (err, result) => {
+        if (err) {
+          if (err.code === 'ER_DUP_ENTRY') {
+            return res.status(409).json({ message: 'Username already exists' });
+          }
+          return res.status(500).json({ message: 'Database error', error: err });
+        }
+        res.status(201).json({ message: 'User registered successfully' });
       }
-
-      console.log('User registered:', { username, hashedPassword });
-      res.status(201).json({ message: 'User registered successfully', userId: result.insertId });
-    });
-  } catch (error) {
-    console.error('Error during registration:', error.message);
-    res.status(500).json({ error: 'Internal server error', details: error.message });
+    );
+  } catch (err) {
+    res.status(500).json({ message: 'Error registering user', error: err.message });
   }
 });
 
-// Login a user
+// Login
 app.post('/login', (req, res) => {
   const { username, password } = req.body;
 
-  if (!username || !password) {
-    return res.status(400).json({ error: 'Username and password are required' });
-  }
+  connection.query(
+    'SELECT * FROM login_tbl WHERE username = ?',
+    [username],
+    async (err, results) => {
+      if (err) {
+        return res.status(500).json({ message: 'Database error', error: err });
+      }
 
-  const sql = 'SELECT * FROM login_tbl WHERE username = ?';
-  db.query(sql, [username], async (err, results) => {
-    if (err) return res.status(500).json({ error: err.message });
+      if (results.length === 0) {
+        return res.status(401).json({ message: 'Invalid credentials' });
+      }
 
-    if (results.length === 0) {
-      return res.status(401).json({ error: 'Invalid username or password' });
+      const user = results[0];
+
+      const isPasswordValid = await bcrypt.compare(password, user.password);
+      if (!isPasswordValid) {
+        return res.status(401).json({ message: 'Invalid credentials' });
+      }
+
+      const token = jwt.sign(
+        { id: user.id, username: user.username },
+        process.env.JWT_SECRET,
+        { expiresIn: '1h' }
+      );
+
+      res.json({ message: 'Login successful', token });
     }
-
-    const user = results[0];
-    const passwordMatch = await bcrypt.compare(password, user.password);
-
-    if (!passwordMatch) {
-      return res.status(401).json({ error: 'Invalid username or password' });
-    }
-
-    // Generate JWT token
-    const token = jwt.sign({ userId: user.id, username: user.username }, JWT_SECRET, { expiresIn: '1h' });
-
-    res.status(200).json({ message: 'Login successful', token });
-  });
+  );
 });
 
-// Middleware to authenticate token
-const authenticateToken = (req, res, next) => {
-  const token = req.headers['authorization'];
+function authenticateToken(req, res, next) {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
 
   if (!token) {
-    return res.status(403).json({ error: 'Access denied. No token provided.' });
+    console.log('No token provided');
+    return res.status(401).json({ error: 'Token required' });
   }
 
-  jwt.verify(token, JWT_SECRET, (err, user) => {
+  jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
     if (err) {
+      console.log('Token verification error:', err.message); // Log the error
       return res.status(403).json({ error: 'Invalid or expired token' });
     }
-
     req.user = user;
+    console.log('Token successfully verified:', user); // Log the user payload
     next();
   });
-};
-
-// Example protected route
-app.get('/protected', authenticateToken, (req, res) => {
-  res.status(200).json({ message: 'This is a protected route', user: req.user });
-});
+}
 
 
-// Retrieve all blog posts (protected)
+// Retrieve all blog posts
 app.get('/posts', authenticateToken, (req, res) => {
-  db.query('SELECT * FROM posts', (err, results) => {
-    if (err) return res.status(500).send(err);
-    res.json(results);
+  connection.query('SELECT * FROM blog_tbl', (err, results) => {
+    if (err) {
+      return res.status(500).json({ message: 'Database error', error: err });
+    }
+    res.status(200).json(results);
   });
 });
 
-// Retrieve specific blog post (protected)
+// Retrieve specific blog post
 app.get('/posts/:id', authenticateToken, (req, res) => {
-  db.query('SELECT * FROM posts WHERE id = ?', [req.params.id], (err, results) => {
-    if (err) return res.status(500).send(err);
-    if (results.length === 0) return res.status(404).send({ message: 'Post not found' });
-    res.json(results[0]);
+  connection.query('SELECT * FROM blog_tbl WHERE id = ?', [req.params.id], (err, results) => {
+    if (err) return res.status(500).json({ message: 'Database error', error: err });
+    if (results.length === 0) return res.status(404).json({ message: 'Post not found' });
+    res.status(200).json(results[0]);
   });
 });
 
-// Create new blog post (protected)
+// Create new post
 app.post('/posts', authenticateToken, (req, res) => {
   const { title, content, author } = req.body;
-  const sql = 'INSERT INTO posts (title, content, author) VALUES (?, ?, ?)';
-  db.query(sql, [title, content, author], (err, result) => {
-    if (err) return res.status(500).send(err);
-    res.status(201).json({ id: result.insertId, title, content, author });
-  });
+  connection.query(
+    'INSERT INTO blog_tbl (title, content, author) VALUES (?, ?, ?)',
+    [title, content, author],
+    (err, result) => {
+      if (err) return res.status(500).json({ message: 'Database error', error: err });
+      res.status(201).json({ message: 'Post created', postId: result.insertId });
+    }
+  );
 });
 
-// Update blog post (protected)
+// Update existing post
 app.put('/posts/:id', authenticateToken, (req, res) => {
   const { title, content, author } = req.body;
-  const sql = 'UPDATE posts SET title = ?, content = ?, author = ? WHERE id = ?';
-  db.query(sql, [title, content, author, req.params.id], (err) => {
-    if (err) return res.status(500).send(err);
-    res.json({ id: req.params.id, title, content, author });
-  });
+  connection.query(
+    'UPDATE blog_tbl SET title = ?, content = ?, author = ? WHERE id = ?',
+    [title, content, author, req.params.id],
+    (err, result) => {
+      if (err) return res.status(500).json({ message: 'Database error', error: err });
+      if (result.affectedRows === 0) return res.status(404).json({ message: 'Post not found' });
+      res.status(200).json({ message: 'Post updated' });
+    }
+  );
 });
 
-// Delete blog post (protected)
+// Delete a post
 app.delete('/posts/:id', authenticateToken, (req, res) => {
-  db.query('DELETE FROM posts WHERE id = ?', [req.params.id], (err) => {
-    if (err) return res.status(500).send(err);
-    res.json({ message: 'Post deleted', id: req.params.id });
+  connection.query('DELETE FROM blog_tbl WHERE id = ?', [req.params.id], (err, result) => {
+    if (err) return res.status(500).json({ message: 'Database error', error: err });
+    if (result.affectedRows === 0) return res.status(404).json({ message: 'Post not found' });
+    res.status(200).json({ message: 'Post deleted' });
   });
 });
-
-
