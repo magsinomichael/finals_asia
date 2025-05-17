@@ -116,3 +116,51 @@ const authenticateToken = (req, res, next) => {
 app.get('/protected', authenticateToken, (req, res) => {
   res.status(200).json({ message: 'This is a protected route', user: req.user });
 });
+
+
+// Retrieve all blog posts (protected)
+app.get('/posts', authenticateToken, (req, res) => {
+  db.query('SELECT * FROM posts', (err, results) => {
+    if (err) return res.status(500).send(err);
+    res.json(results);
+  });
+});
+
+// Retrieve specific blog post (protected)
+app.get('/posts/:id', authenticateToken, (req, res) => {
+  db.query('SELECT * FROM posts WHERE id = ?', [req.params.id], (err, results) => {
+    if (err) return res.status(500).send(err);
+    if (results.length === 0) return res.status(404).send({ message: 'Post not found' });
+    res.json(results[0]);
+  });
+});
+
+// Create new blog post (protected)
+app.post('/posts', authenticateToken, (req, res) => {
+  const { title, content, author } = req.body;
+  const sql = 'INSERT INTO posts (title, content, author) VALUES (?, ?, ?)';
+  db.query(sql, [title, content, author], (err, result) => {
+    if (err) return res.status(500).send(err);
+    res.status(201).json({ id: result.insertId, title, content, author });
+  });
+});
+
+// Update blog post (protected)
+app.put('/posts/:id', authenticateToken, (req, res) => {
+  const { title, content, author } = req.body;
+  const sql = 'UPDATE posts SET title = ?, content = ?, author = ? WHERE id = ?';
+  db.query(sql, [title, content, author, req.params.id], (err) => {
+    if (err) return res.status(500).send(err);
+    res.json({ id: req.params.id, title, content, author });
+  });
+});
+
+// Delete blog post (protected)
+app.delete('/posts/:id', authenticateToken, (req, res) => {
+  db.query('DELETE FROM posts WHERE id = ?', [req.params.id], (err) => {
+    if (err) return res.status(500).send(err);
+    res.json({ message: 'Post deleted', id: req.params.id });
+  });
+});
+
+
